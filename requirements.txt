@@ -1,0 +1,10 @@
+streamlit
+cx_Oracle
+python-dotenv
+sentence-transformers
+faiss-cpu  # or faiss-gpu if using GPU
+langchain
+langchain-community
+langchain-mistralai
+pyngrok
+numpy
