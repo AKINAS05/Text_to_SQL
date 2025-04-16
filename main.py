@@ -1,7 +1,7 @@
-# main.py
 import os
 import json
 import logging
+import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Union
 
@@ -11,15 +11,14 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
+from langchain.prompts import PromptTemplate
 from langchain_mistralai import ChatMistralAI
 from langchain.chains import LLMChain
-from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
+import os
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -37,8 +36,9 @@ DB_CONFIG = {
     "schema": os.getenv("DB_SCHEMA", "TECH_SCHEMA"),
 }
 
-# Mistral API key from environment variables
-MISTRAL_API_KEY = "pNe4xqYCsQWRkN8ORRDfJ2vmQjUO6sHx"
+# API keys from environment variables
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "pNe4xqYCsQWRkN8ORRDfJ2vmQjUO6sHx")
+HF_API_KEY = os.getenv("HF_API_KEY", "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")
 
 # File paths
 SCHEMA_FILE = "table_details.json"
@@ -49,6 +49,9 @@ LAST_FETCH_FILE = "last_fetch.txt"
 
 # Available models
 MISTRAL_MODELS = ["mistral-large-latest", "mistral-medium", "mistral-small"]
+
+# Default embedding model
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Pydantic models for request/response
 class NLQueryRequest(BaseModel):
@@ -66,9 +69,47 @@ class StatusResponse(BaseModel):
     last_updated: Optional[str] = None
     schema_tables_count: Optional[int] = None
 
+class ExecuteSQLRequest(BaseModel):
+    sql_query: str
+
+class HuggingFaceEmbedder:
+    def __init__(self, model_name=DEFAULT_EMBEDDING_MODEL):
+        self.model_name = model_name
+        self.api_key = HF_API_KEY
+        if not self.api_key:
+            logger.warning("No Hugging Face API key found. Set HF_API_KEY in your environment.")
+    
+    def encode(self, texts):
+        """Get embeddings from the Hugging Face inference API"""
+        if not self.api_key:
+            raise ValueError("Hugging Face API key is required")
+        
+        if not isinstance(texts, list):
+            texts = [texts]
+        
+        api_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{self.model_name}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        
+        try:
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json={"inputs": texts, "options": {"wait_for_model": True}}
+            )
+            response.raise_for_status()  # Raise exception for HTTP errors
+            
+            embeddings = response.json()
+            # Convert to numpy array with float32 type for FAISS compatibility
+            embeddings = np.array(embeddings, dtype=np.float32)
+            return embeddings
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error calling Hugging Face API: {str(e)}")
+            raise ValueError(f"Failed to get embeddings: {str(e)}")
+
 class SchemaVectorSearch:
-    def __init__(self, model_name="all-MiniLM-L6-v2"):
-        self.model = SentenceTransformer(model_name)
+    def __init__(self, model_name=DEFAULT_EMBEDDING_MODEL):
+        self.model = HuggingFaceEmbedder(model_name)
         self.index = None
         self.table_data = []
         self.table_names = []
@@ -171,20 +212,36 @@ class SchemaVectorSearch:
         
         logger.info(f"Schema data loaded and indexed with {len(self.table_names)} tables")
     
+    def normalize_vectors(self, vectors):
+        """Safe normalization of vectors for FAISS"""
+        # Create a copy with the right dtype
+        vectors_float32 = np.array(vectors, dtype=np.float32)
+        faiss.normalize_L2(vectors_float32)
+        return vectors_float32
+    
     def build_index(self):
         if not self.table_data:
             self.index = None
             return
         
-        table_vectors = self.model.encode(self.table_data)
-        faiss.normalize_L2(table_vectors)
-        
-        vector_dimension = table_vectors.shape[1]
-        self.index = faiss.IndexFlatIP(vector_dimension)
-        self.index.add(table_vectors)
-        
-        faiss.write_index(self.index, VECTOR_INDEX_FILE)
-        logger.info(f"Vector index built with dimension {vector_dimension}")
+        try:
+            # Get embeddings
+            table_vectors = self.model.encode(self.table_data)
+            
+            # Ensure vectors are float32 and normalize
+            table_vectors = self.normalize_vectors(table_vectors)
+            
+            # Create FAISS index
+            vector_dimension = table_vectors.shape[1]
+            self.index = faiss.IndexFlatIP(vector_dimension)
+            self.index.add(table_vectors)
+            
+            faiss.write_index(self.index, VECTOR_INDEX_FILE)
+            logger.info(f"Vector index built with dimension {vector_dimension}")
+        except Exception as e:
+            error_msg = f"Error building index: {str(e)}"
+            logger.error(error_msg)
+            self.index = None
     
     def load_from_disk(self):
         try:
@@ -211,25 +268,35 @@ class SchemaVectorSearch:
         if self.index is None or self.index.ntotal == 0:
             return []
         
-        query_vector = self.model.encode([query])
-        faiss.normalize_L2(query_vector)
-        
-        scores, indices = self.index.search(query_vector, top_k)
-        
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx < len(self.table_names) and scores[0][i] > 0:
-                results.append({
-                    "table_name": self.table_names[idx],
-                    "similarity_score": float(scores[0][i]),
-                    "description": self.table_data[idx]
-                })
-        
-        # Sort by similarity score in descending order
-        results.sort(key=lambda x: x["similarity_score"], reverse=True)
-        
-        logger.info(f"Search for '{query}' returned {len(results)} results")
-        return results
+        try:
+            # Get query embedding
+            query_vector = self.model.encode([query])
+            
+            # Ensure vector is float32 and normalize
+            query_vector = self.normalize_vectors(query_vector)
+            
+            # Search in FAISS index
+            scores, indices = self.index.search(query_vector, top_k)
+            
+            results = []
+            for i, idx in enumerate(indices[0]):
+                if idx >= 0 and idx < len(self.table_names) and scores[0][i] > 0:
+                    results.append({
+                        "table_name": self.table_names[idx],
+                        "similarity_score": float(scores[0][i]),
+                        "description": self.table_data[idx]
+                    })
+            
+            # Sort by similarity score in descending order
+            results.sort(key=lambda x: x["similarity_score"], reverse=True)
+            
+            logger.info(f"Search for '{query}' returned {len(results)} results")
+            return results
+            
+        except Exception as e:
+            error_msg = f"Error during search: {str(e)}"
+            logger.error(error_msg)
+            return []
 
 def should_fetch_schema():
     if not os.path.exists(LAST_FETCH_FILE):
@@ -291,8 +358,7 @@ def generate_sql(schema_text, nl_query, model="mistral-large-latest"):
         return None, error_msg
 
 def execute_sql_query(sql_query):
-    """Execute the SQL query and return results (for future implementation)"""
-    # This is a placeholder function for future functionality
+    """Execute the SQL query and return results"""
     try:
         dsn_tns = cx_Oracle.makedsn(
             DB_CONFIG["host"], 
@@ -346,13 +412,24 @@ schema_loaded = schema_search.load_from_disk()
 
 # Dependency to ensure schema is loaded
 async def get_schema_search():
+    global schema_loaded
     if not schema_loaded and not os.path.exists(SCHEMA_FILE):
         # Try to fetch schema if not loaded
         schema_json, error = schema_search.fetch_schema()
         if not error:
             schema_search.load_schema_data(schema_json)
+            schema_loaded = True
         else:
             raise HTTPException(status_code=503, detail=f"Schema not available: {error}")
+    elif not schema_loaded and os.path.exists(SCHEMA_FILE):
+        # Load from file if exists but not loaded in memory
+        try:
+            with open(SCHEMA_FILE, 'r') as f:
+                schema_json = json.load(f)
+            schema_search.load_schema_data(schema_json)
+            schema_loaded = True
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Failed to load schema from file: {str(e)}")
     return schema_search
 
 # Background task to update schema
@@ -372,6 +449,8 @@ async def startup_event():
         schema_json, error = schema_search.fetch_schema()
         if not error:
             schema_search.load_schema_data(schema_json)
+            global schema_loaded
+            schema_loaded = True
         else:
             logger.error(f"Error fetching schema on startup: {error}")
 
@@ -413,6 +492,8 @@ async def update_schema():
         raise HTTPException(status_code=500, detail=f"Error fetching schema: {error}")
     
     schema_search.load_schema_data(schema_json)
+    global schema_loaded
+    schema_loaded = True
     
     return {
         "status": "success",
@@ -470,10 +551,14 @@ async def generate_sql_endpoint(
         # Prepare schema text from relevant tables
         schema_text = ""
         for table in relevant_tables:
-            schema_text += f"Table: {table['table_name']}\nColumns:\n"
-            for col in schema_json[table["table_name"]]:
-                nullable = "NULL" if col['nullable'] == 'Y' else "NOT NULL"
-                schema_text += f"- {col['column_name']} ({col['data_type']}, {nullable})\n"
+            table_name = table['table_name']
+            if table_name in schema_json:
+                schema_text += f"Table: {table_name}\nColumns:\n"
+                for col in schema_json[table_name]:
+                    nullable = "NULL" if col['nullable'] == 'Y' else "NOT NULL"
+                    schema_text += f"- {col['column_name']} ({col['data_type']}, {nullable})\n"
+            else:
+                logger.warning(f"Table {table_name} found in vector search but not in schema file")
         
         # Generate SQL query
         sql_query, error = generate_sql(schema_text, nl_query, model)
@@ -495,8 +580,8 @@ async def generate_sql_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/execute-sql", tags=["SQL"])
-async def execute_sql_endpoint(sql_query: str):
-    results, error = execute_sql_query(sql_query)
+async def execute_sql_endpoint(request: ExecuteSQLRequest):
+    results, error = execute_sql_query(request.sql_query)
     
     if error:
         raise HTTPException(status_code=500, detail=f"Error executing SQL: {error}")
@@ -508,4 +593,5 @@ async def execute_sql_endpoint(sql_query: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
