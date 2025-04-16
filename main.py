@@ -28,17 +28,17 @@ logger = logging.getLogger(__name__)
 
 # Database connection details from environment variables
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": os.getenv("DB_PORT", "1521"),
-    "service_name": os.getenv("DB_SERVICE_NAME", "ORCLPDB"),
-    "user": os.getenv("DB_USER", "TECH_SCHEMA"),
-    "password": os.getenv("DB_PASSWORD", "5669"),
-    "schema": os.getenv("DB_SCHEMA", "TECH_SCHEMA"),
+    "host": os.getenv("DB_HOST"),
+    "port": os.getenv("DB_PORT"),
+    "service_name": os.getenv("DB_SERVICE_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "schema": os.getenv("DB_SCHEMA"),
 }
 
 # API keys from environment variables
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "pNe4xqYCsQWRkN8ORRDfJ2vmQjUO6sHx")
-HF_API_KEY = os.getenv("HF_API_KEY", "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")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+HF_API_KEY = os.getenv("HF_API_KEY")
 
 # File paths
 SCHEMA_FILE = "table_details.json"
