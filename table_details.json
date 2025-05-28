@@ -509,6 +509,44 @@
             "nullable": "Y"
         }
     ],
+    "EMPLOYEE": [
+        {
+            "column_name": "EMP_ID",
+            "data_type": "NUMBER",
+            "data_length": 22,
+            "nullable": "N"
+        },
+        {
+            "column_name": "FIRST_NAME",
+            "data_type": "VARCHAR2",
+            "data_length": 50,
+            "nullable": "Y"
+        },
+        {
+            "column_name": "LAST_NAME",
+            "data_type": "VARCHAR2",
+            "data_length": 50,
+            "nullable": "Y"
+        },
+        {
+            "column_name": "EMAIL",
+            "data_type": "VARCHAR2",
+            "data_length": 100,
+            "nullable": "Y"
+        },
+        {
+            "column_name": "HIRE_DATE",
+            "data_type": "DATE",
+            "data_length": 7,
+            "nullable": "Y"
+        },
+        {
+            "column_name": "SALARY",
+            "data_type": "NUMBER",
+            "data_length": 22,
+            "nullable": "Y"
+        }
+    ],
     "EMPLOYEE_DEPARTMENT": [
         {
             "column_name": "DEPT_ID",
